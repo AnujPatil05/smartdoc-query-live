@@ -8,18 +8,14 @@ from typing import List, Dict
 import hashlib
 import json
 import asyncio
-from google import genai
-from google.genai import types
+import httpx
 
 from app.core.config import settings
 from app.core.database import database
 from app.core.redis import get_redis
 
-# Initialize Gemini client (force v1 API — text-embedding-004 is not on v1beta)
-_genai_client = genai.Client(
-    api_key=settings.GOOGLE_API_KEY,
-    http_options={"api_version": "v1"},
-)
+# Gemini REST API endpoint (v1beta supports text-embedding-004)
+_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
 encoder = tiktoken.encoding_for_model("gpt-4")
 
 
@@ -208,29 +204,41 @@ class DocumentService:
     
     @staticmethod
     async def generate_embedding(text: str, max_retries: int = 3) -> List[float]:
-        """Generate embedding using Google Gemini with retry logic"""
+        """Generate embedding via Gemini REST API with retry logic"""
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": text}]},
+            "taskType": "RETRIEVAL_DOCUMENT",
+        }
+        params = {"key": settings.GOOGLE_API_KEY}
+
         for attempt in range(max_retries):
             try:
-                result = await asyncio.to_thread(
-                    _genai_client.models.embed_content,
-                    model=settings.EMBEDDING_MODEL,
-                    contents=text,
-                    config=types.EmbedContentConfig(
-                        task_type="RETRIEVAL_DOCUMENT",
-                        output_dimensionality=settings.EMBEDDING_DIMENSION,
-                    ),
-                )
-                return list(result.embeddings[0].values)
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
-                    # Rate limit - wait and retry
-                    wait_time = (2 ** attempt) * 10  # 10s, 20s, 40s
-                    print(f"   Rate limited. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
-                    await asyncio.sleep(wait_time)
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        _EMBED_URL,
+                        json=payload,
+                        params=params,
+                    )
+                    if response.status_code == 429:
+                        wait_time = (2 ** attempt) * 10
+                        print(f"   Rate limited. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    values = data["embedding"]["values"]
+                    # Truncate/pad to match DB dimension
+                    dim = settings.EMBEDDING_DIMENSION
+                    if len(values) > dim:
+                        values = values[:dim]
+                    return values
+            except httpx.HTTPStatusError as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
                 else:
-                    raise
-        
+                    raise Exception(f"Embedding API error: {e.response.status_code} {e.response.text}")
+
         raise Exception(f"Failed to generate embedding after {max_retries} retries")
     
     @staticmethod

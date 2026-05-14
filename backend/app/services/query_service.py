@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import httpx
 import json
 import re
 from typing import Dict, List, Optional
@@ -10,7 +11,13 @@ from google.genai import types
 from app.core.config import settings
 from app.core.database import database
 from app.core.redis import get_redis
-from app.services.document_service import DocumentService, _genai_client
+from app.services.document_service import DocumentService, _EMBED_URL
+
+# Gemini LLM client
+_llm_client = genai.Client(
+    api_key=settings.GOOGLE_API_KEY,
+    http_options={"api_version": "v1beta"},
+)
 
 
 class QueryService:
@@ -61,24 +68,31 @@ class QueryService:
 
     @staticmethod
     async def generate_query_embedding(query: str) -> List[float]:
-        """Generate and cache an embedding for a query."""
+        """Generate and cache an embedding for a query via REST API."""
         cached = await DocumentService.get_cached_embedding(query)
         if cached:
             return cached
 
-        result = await asyncio.to_thread(
-            _genai_client.models.embed_content,
-            model=settings.EMBEDDING_MODEL,
-            contents=query,
-            config=types.EmbedContentConfig(
-                task_type="RETRIEVAL_QUERY",
-                output_dimensionality=settings.EMBEDDING_DIMENSION,
-            ),
-        )
+        payload = {
+            "model": "models/text-embedding-004",
+            "content": {"parts": [{"text": query}]},
+            "taskType": "RETRIEVAL_QUERY",
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                _EMBED_URL,
+                json=payload,
+                params={"key": settings.GOOGLE_API_KEY},
+            )
+            response.raise_for_status()
+            values = response.json()["embedding"]["values"]
 
-        embedding = list(result.embeddings[0].values)
-        await DocumentService.cache_embedding(query, embedding)
-        return embedding
+        dim = settings.EMBEDDING_DIMENSION
+        if len(values) > dim:
+            values = values[:dim]
+
+        await DocumentService.cache_embedding(query, values)
+        return values
 
     @staticmethod
     async def semantic_search(
@@ -147,7 +161,7 @@ class QueryService:
         """Generate a grounded answer using Gemini."""
         context = QueryService.build_context(chunks)
         response = await asyncio.to_thread(
-            _genai_client.models.generate_content,
+            _llm_client.models.generate_content,
             model=settings.LLM_MODEL,
             contents=QueryService.build_user_prompt(query, context, conversation_history),
             config=types.GenerateContentConfig(
