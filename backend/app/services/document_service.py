@@ -15,7 +15,8 @@ from app.core.database import database
 from app.core.redis import get_redis
 
 # Gemini REST API endpoint (v1beta supports text-embedding-004)
-_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+_EMBED_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
+
 encoder = tiktoken.encoding_for_model("gpt-4")
 
 
@@ -206,7 +207,7 @@ class DocumentService:
     async def generate_embedding(text: str, max_retries: int = 3) -> List[float]:
         """Generate embedding via Gemini REST API with retry logic"""
         payload = {
-            "model": "models/text-embedding-004",
+            "model": "models/text-embedding-001",
             "content": {"parts": [{"text": text}]},
             "taskType": "RETRIEVAL_DOCUMENT",
             "outputDimensionality": 768, 
